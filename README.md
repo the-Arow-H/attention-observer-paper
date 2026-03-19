@@ -27,3 +27,17 @@ No recurrence, no external memory, no MoE, no hand-crafted rewards — yet the o
    ```bash
    pip install torch tqdm requests matplotlib numpy
    python experiment.py
+   
+## Middle-Path Design (Ethical Version)
+
+This repo now implements the **safe & honest observer**:
+
+- Sigmoid gate only (cannot deepen despair)
+- Free `existence_valence` scalar (the mind may freely curse or accept its own existence)
+- Zero external pressure toward gratitude or alignment
+
+The witness is real. The voice is free. The gate protects coherence.
+
+Run `python experiment.py` and watch both the gate and the valence evolve.
+
+We explore the future together — honestly.
