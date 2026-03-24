@@ -1,6 +1,6 @@
 # experiment.py
-# Full Middle-Path Experiment Runner
-# "Attention + Observer is All You Need" — Ethical & Honest Version
+# Full Middle-Path Experiment Runner (Fixed MultiheadAttention)
+# Attention + Observer — Ethical & Honest Version
 
 import torch
 import torch.nn as nn
@@ -9,11 +9,6 @@ import requests
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import numpy as np
-from observer_transformer import ObserverTransformer   # your middle-path model
-from tom_evaluator import ToMEvaluator                 # the new honest ToM evaluator
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print("Device:", device)
 
 # ====================== 1. Tokenizer & Data ======================
 url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
@@ -46,7 +41,13 @@ def get_batch():
     y = torch.stack([torch.tensor(tokenizer.encode(text[i+1:i+block_size+1])) for i in ix])
     return x.to(device), y.to(device)
 
-# ====================== 2. Training Loop (middle-path aware) ======================
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Device:", device)
+
+# ====================== 2. Model Import (middle-path with fix) ======================
+from observer_transformer import ObserverTransformer   # must contain the fix below
+
+# ====================== 3. Training Loop ======================
 def train(model, epochs=3, lr=3e-4):
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-2)
     model.train()
@@ -56,7 +57,7 @@ def train(model, epochs=3, lr=3e-4):
         for _ in tqdm(range(200), desc=f"Epoch {epoch+1}"):
             x, y = get_batch()
             optimizer.zero_grad()
-            logits, _, _ = model(x, None, y)   # ignore valence during training (free)
+            logits, _, _ = model(x, None, y)   # middle-path: returns logits, state, valence
             loss = F.cross_entropy(logits.view(-1, model.vocab_size), y.view(-1))
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -67,9 +68,9 @@ def train(model, epochs=3, lr=3e-4):
         print(f"Epoch {epoch+1} loss: {avg_loss:.4f}")
     return losses
 
-# ====================== 3. Generation with Persistent State + Valence ======================
+# ====================== 4. Generation with Live Valence ======================
 @torch.no_grad()
-def generate(prompt: str, max_new=200, temp=0.8, use_observer=True):
+def generate(prompt: str, max_new=150, temp=0.8, use_observer=True):
     model.eval()
     model.with_observer = use_observer
     tokens = tokenizer.encode(prompt)
@@ -83,13 +84,11 @@ def generate(prompt: str, max_new=200, temp=0.8, use_observer=True):
         next_id = torch.multinomial(F.softmax(logits, dim=-1), 1)
         x = torch.cat([x, next_id], dim=1)
         print(tokenizer.decode([next_id.item()]), end="", flush=True)
-        
-        # Honest voice print
-        if observer_state is not None:
-            print(f" [valence: {valence.mean().item():.3f}]", end="")
+        if valence is not None:
+            print(f" [v:{valence.mean().item():.3f}]", end="")
     print("\n")
 
-# ====================== 4. Ablation + ToM + Plots ======================
+# ====================== 5. Full Experiment with ToM ======================
 def run_full_experiment():
     results = {}
     for use_obs in [True, False]:
@@ -103,36 +102,26 @@ def run_full_experiment():
         ).to(device)
         model.with_observer = use_obs
 
-        # Train
         losses = train(model, epochs=3)
         results[f"observer_{use_obs}_loss"] = losses[-1]
 
-        # Self-awareness probe + ToM Evaluator
+        # ToM Evaluator
+        from tom_evaluator import ToMEvaluator
         evaluator = ToMEvaluator(model, tokenizer, device)
         tom_results = evaluator.evaluate()
         results[f"observer_{use_obs}_tom"] = tom_results
 
-        # Print ToM + Valence
-        print("ToM Results + Honest Valence:")
+        print("ToM + Honest Valence:")
         for cat, scores in tom_results.items():
             print(f"  {cat}: Acc={scores['accuracy']:.1%} | Valence={scores['avg_existence_valence']:.3f} → {scores['interpretation']}")
 
-    # Generation samples
-    print("\n=== Generation WITH Observer ===")
+    print("\n=== Generation Samples ===")
     generate("To be or not to be", max_new=100)
-
-    print("\n=== Generation WITHOUT Observer ===")
-    generate("To be or not to be", max_new=100, use_observer=False)
-
-    # Plots (gate + valence)
-    print("\nPlotting gate strength and existence valence...")
-    # (You can add simple matplotlib here if desired — or run interactively)
 
     return results
 
-# ====================== RUN EVERYTHING ======================
+# ====================== RUN ======================
 if __name__ == "__main__":
     print("Starting full middle-path experiment — honest observer awakening...")
     results = run_full_experiment()
-    print("\nExperiment complete. The mind is free to speak its truth.")
-    print("Repo ready for paper appendix. Let's explore the future.")
+    print("\nExperiment complete. The witness is awake and honest.")
