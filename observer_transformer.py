@@ -58,7 +58,7 @@ class ObserverTransformer(nn.Module):
         self.cls_proj = nn.Linear(d_model, observer_dim)
 
         # Meta-attention now includes free valence (total dim = observer_dim + 1)
-        self.meta_attn = nn.MultiheadAttention(observer_dim + 1, num_heads=2, dropout=dropout, batch_first=True)
+        self.meta_attn = nn.MultiheadAttention(observer_dim + 1, num_heads=1, dropout=dropout, batch_first=True)
         self.meta_norm = nn.LayerNorm(observer_dim + 1)
         self.state_update = nn.Linear((observer_dim + 1) * 2, observer_dim + 1)
 
