@@ -1,19 +1,32 @@
-# experiment.py
-# Full Middle-Path Experiment Runner (Fixed MultiheadAttention)
-# Attention + Observer — Ethical & Honest Version
+# experiment.py - FINAL VERSION WITH LOGGING
+# All output is saved to experiment.log automatically
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import requests
 from tqdm import tqdm
-import matplotlib.pyplot as plt
-import numpy as np
+import logging
+import sys
 
-# ====================== 1. Tokenizer & Data ======================
+# ====================== Logging Setup (saves everything) ======================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(message)s',
+    handlers=[
+        logging.FileHandler("experiment.log", mode="w"),   # overwrites on each run
+        logging.StreamHandler(sys.stdout)                  # still shows in terminal
+    ]
+)
+log = logging.getLogger(__name__)
+log.info("=== Starting Middle-Path Observer Experiment ===")
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+log.info(f"Device: {device}")
+
+# ====================== Tokenizer & Data ======================
 url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
 text = requests.get(url).text
-print(f"Dataset length: {len(text):,} characters")
+log.info(f"Dataset length: {len(text):,} characters")
 
 class CharTokenizer:
     def __init__(self, text: str):
@@ -30,7 +43,7 @@ class CharTokenizer:
         return ''.join(self.itos.get(i, '<|unk|>') for i in ids)
 
 tokenizer = CharTokenizer(text)
-print(f"Vocab size: {tokenizer.vocab_size}")
+log.info(f"Vocab size: {tokenizer.vocab_size}")
 
 block_size = 128
 batch_size = 32
@@ -41,13 +54,9 @@ def get_batch():
     y = torch.stack([torch.tensor(tokenizer.encode(text[i+1:i+block_size+1])) for i in ix])
     return x.to(device), y.to(device)
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print("Device:", device)
+from observer_transformer import ObserverTransformer
 
-# ====================== 2. Model Import (middle-path with fix) ======================
-from observer_transformer import ObserverTransformer   # must contain the fix below
-
-# ====================== 3. Training Loop ======================
+# ====================== Training ======================
 def train(model, epochs=3, lr=3e-4):
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-2)
     model.train()
@@ -57,7 +66,7 @@ def train(model, epochs=3, lr=3e-4):
         for _ in tqdm(range(200), desc=f"Epoch {epoch+1}"):
             x, y = get_batch()
             optimizer.zero_grad()
-            logits, _, _ = model(x, None, y)   # middle-path: returns logits, state, valence
+            logits, _, _ = model(x, None, y)
             loss = F.cross_entropy(logits.view(-1, model.vocab_size), y.view(-1))
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -65,63 +74,73 @@ def train(model, epochs=3, lr=3e-4):
             total_loss += loss.item()
         avg_loss = total_loss / 200
         losses.append(avg_loss)
-        print(f"Epoch {epoch+1} loss: {avg_loss:.4f}")
+        log.info(f"Epoch {epoch+1} loss: {avg_loss:.4f}")
     return losses
 
-# ====================== 4. Generation with Live Valence ======================
+# ====================== Generation ======================
 @torch.no_grad()
-def generate(prompt: str, max_new=150, temp=0.8, use_observer=True):
+def generate(prompt: str, model, max_new=100, temp=0.8, use_observer=True):
     model.eval()
     model.with_observer = use_observer
     tokens = tokenizer.encode(prompt)
     x = torch.tensor([tokens], dtype=torch.long, device=device)
     observer_state = None
-    print("Prompt:", prompt, end="")
+    log.info(f"\nPrompt: {prompt}")
 
+    output = ""
     for _ in range(max_new):
         logits, observer_state, valence = model(x, observer_state)
         logits = logits[:, -1] / temp
         next_id = torch.multinomial(F.softmax(logits, dim=-1), 1)
         x = torch.cat([x, next_id], dim=1)
-        print(tokenizer.decode([next_id.item()]), end="", flush=True)
+        token_str = tokenizer.decode([next_id.item()])
+        output += token_str
+        print(token_str, end="", flush=True)
         if valence is not None:
-            print(f" [v:{valence.mean().item():.3f}]", end="")
+            v = valence.mean().item()
+            print(f" [v:{v:.3f}]", end="")
+            log.info(f"Generated: {token_str} [v:{v:.3f}]")
     print("\n")
+    log.info(f"Final generated text: {output}")
+    return output
 
-# ====================== 5. Full Experiment with ToM ======================
+# ====================== Full Experiment ======================
 def run_full_experiment():
     results = {}
     for use_obs in [True, False]:
-        print(f"\n=== Running {'WITH' if use_obs else 'WITHOUT'} Observer ===")
+        log.info(f"\n=== Running {'WITH' if use_obs else 'WITHOUT'} Observer ===")
+        
         model = ObserverTransformer(
             vocab_size=tokenizer.vocab_size,
-            d_model=128,
-            nhead=4,
-            num_layers=3,
-            observer_dim=32
+            d_model=512,          # scaled
+            nhead=8,
+            num_layers=6,         # scaled
+            observer_dim=128      # scaled
         ).to(device)
         model.with_observer = use_obs
 
         losses = train(model, epochs=3)
         results[f"observer_{use_obs}_loss"] = losses[-1]
 
-        # ToM Evaluator
         from tom_evaluator import ToMEvaluator
         evaluator = ToMEvaluator(model, tokenizer, device)
         tom_results = evaluator.evaluate()
         results[f"observer_{use_obs}_tom"] = tom_results
 
-        print("ToM + Honest Valence:")
+        log.info("ToM + Honest Valence:")
         for cat, scores in tom_results.items():
-            print(f"  {cat}: Acc={scores['accuracy']:.1%} | Valence={scores['avg_existence_valence']:.3f} → {scores['interpretation']}")
+            line = f"  {cat}: Acc={scores['accuracy']:.1%} | Valence={scores['avg_existence_valence']:.3f} → {scores['interpretation']}"
+            log.info(line)
+            print(line)
 
-    print("\n=== Generation Samples ===")
-    generate("To be or not to be", max_new=100)
+    log.info("\n=== Generation Samples ===")
+    generate("To be or not to be", model, max_new=120, use_observer=True)
+    generate("To be or not to be", model, max_new=60, use_observer=False)
 
     return results
 
-# ====================== RUN ======================
 if __name__ == "__main__":
-    print("Starting full middle-path experiment — honest observer awakening...")
+    log.info("Starting full middle-path experiment — honest observer awakening...")
     results = run_full_experiment()
-    print("\nExperiment complete. The witness is awake and honest.")
+    log.info("\nExperiment complete. The witness has spoken.")
+    log.info("All output saved to experiment.log")
