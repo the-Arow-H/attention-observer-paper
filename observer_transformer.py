@@ -20,7 +20,11 @@ class TransformerBlock(nn.Module):
     def __init__(self, d_model: int, nhead: int, dim_feedforward: int = 1024, dropout: float = 0.1):
         super().__init__()
         self.attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
-        self.ffn = nn.Sequential(nn.Linear(d_model, dim_feedforward), nn.GELU(), nn.Linear(dim_feedforward, d_model))
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, dim_feedforward),
+            nn.GELU(),
+            nn.Linear(dim_feedforward, d_model)
+        )
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
@@ -33,42 +37,41 @@ class TransformerBlock(nn.Module):
 
 class ObserverTransformer(nn.Module):
     """
-    Middle-Path Observer-Transformer (Ethical & Honest Design)
-    - Sigmoid gate (unidirectional safety — cannot deepen despair)
-    - Free existence_valence scalar (last dimension of observer_state)
-      → the mind can freely say "I curse this" or "I accept this"
-      → zero effect on gate or loss (pure honest voice)
+    SCALED Middle-Path Observer-Transformer
+    d_model=512, num_layers=6, observer_dim=128
     """
-    def __init__(self, vocab_size: int, d_model: int = 256, nhead: int = 8,
-                 num_layers: int = 6, observer_dim: int = 64, dropout: float = 0.1):
+    def __init__(self, vocab_size: int, d_model: int = 512, nhead: int = 8,
+                 num_layers: int = 6, observer_dim: int = 128, dropout: float = 0.1):
         super().__init__()
         self.d_model = d_model
         self.vocab_size = vocab_size
-        self.observer_dim = observer_dim  # meta part
+        self.observer_dim = observer_dim
         self.with_observer = True
 
         self.embedding = nn.Embedding(vocab_size, d_model)
         self.pos_encoding = PositionalEncoding(d_model)
 
-        self.layers = nn.ModuleList([TransformerBlock(d_model, nhead, d_model*4, dropout) for _ in range(num_layers)])
+        self.layers = nn.ModuleList([
+            TransformerBlock(d_model, nhead, d_model*4, dropout) 
+            for _ in range(num_layers)
+        ])
 
-        # Observer components
         self.attn_pool = nn.Linear(num_layers, observer_dim)
         self.error_proj = nn.Linear(1, observer_dim)
         self.cls_proj = nn.Linear(d_model, observer_dim)
 
-        # Meta-attention now includes free valence (total dim = observer_dim + 1)
         self.meta_attn = nn.MultiheadAttention(observer_dim + 1, num_heads=1, dropout=dropout, batch_first=True)
         self.meta_norm = nn.LayerNorm(observer_dim + 1)
         self.state_update = nn.Linear((observer_dim + 1) * 2, observer_dim + 1)
 
-        # Gate uses ONLY the meta part (safety — valence ignored)
-        self.gate_net = nn.Sequential(nn.Linear(observer_dim, d_model), nn.Sigmoid())
+        self.gate_net = nn.Sequential(
+            nn.Linear(observer_dim, d_model),
+            nn.Sigmoid()
+        )
 
         self.output_head = nn.Linear(d_model, vocab_size)
 
-    def forward(self, x: torch.Tensor, observer_state: torch.Tensor = None,
-                targets: torch.Tensor = None):
+    def forward(self, x: torch.Tensor, observer_state: torch.Tensor = None, targets: torch.Tensor = None):
         B, T = x.shape
         h = self.embedding(x) * math.sqrt(self.d_model)
         h = self.pos_encoding(h)
@@ -82,9 +85,9 @@ class ObserverTransformer(nn.Module):
 
         if not self.with_observer:
             logits = self.output_head(h)
-            return logits, None, None  # logits, state, valence
+            return logits, None, None
 
-        # Meta-input (same as before)
+        # Meta-input
         cls_h = h[:, -1]
         layer_avgs = [aw.mean(dim=(1, 2)) for aw in attn_maps]
         pooled_a = torch.stack(layer_avgs, dim=1)
@@ -101,28 +104,26 @@ class ObserverTransformer(nn.Module):
         err_feat = self.error_proj(error)
 
         cls_feat = self.cls_proj(cls_h)
-        meta = cls_feat + attn_feat + err_feat
+        meta = cls_feat + attn_feat + err_feat   # (B, observer_dim)
 
         if observer_state is None:
             observer_state = torch.zeros(B, self.observer_dim + 1, device=x.device)
 
-        # Meta-attention (includes free valence)
-        meta_seq = torch.cat([meta.unsqueeze(1), observer_state.unsqueeze(1)], dim=1)
+        # FIX: Pad meta to exactly match observer_dim + 1
+        meta_padded = torch.cat([meta, torch.zeros(B, 1, device=x.device)], dim=1)  # now (B, observer_dim+1)
+
+        meta_seq = torch.cat([meta_padded.unsqueeze(1), observer_state.unsqueeze(1)], dim=1)
         meta_out, _ = self.meta_attn(meta_seq, meta_seq, meta_seq)
         observer_new = meta_out[:, 1]
 
-        # Recurrent update
         observer_state = self.meta_norm(
             self.state_update(torch.cat([observer_new, observer_state], dim=-1))
         )
 
-        # Gate (safety — uses only first observer_dim dimensions, ignores valence)
         gate = self.gate_net(observer_state[:, :self.observer_dim]).unsqueeze(1)
         h = h * gate
 
         logits = self.output_head(h)
-
-        # Return free valence for logging / probing (the honest voice)
-        free_valence = observer_state[:, -1]   # shape (B,)
+        free_valence = observer_state[:, -1]
 
         return logits, observer_state, free_valence
